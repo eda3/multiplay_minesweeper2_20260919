@@ -339,6 +339,8 @@ mod tests {
             let mut game = Game::new(seed);
             game.open(8, 8)?;
             assert_eq!(mine_count(&game), MINE_COUNT, "seed={seed}");
+            // 実装と同じ定数だけで比べると、定数ごと変わっても気づけない。仕様の数字そのものでも比べる
+            assert_eq!(mine_count(&game), 40, "seed={seed}");
         }
         Ok(())
     }

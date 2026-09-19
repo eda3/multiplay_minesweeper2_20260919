@@ -15,5 +15,5 @@
   - 足してよい依存: serde（derive）・serde_json（game_core・server）、axum（ws）・tokio・anyhow（server）、tokio-tungstenite・futures-util（server のテスト用）
 - [x] ⑧を満たす（途中参加の人に、見えている盤面が届く）
 - [x] ⑨を満たす（勝敗がつくまで、地雷の位置を送らない）
-- [ ] 点検: test-reviewer に点検させ、指摘を壊し方で確かめて直す（最大2回）
+- [x] 点検: test-reviewer に点検させ、指摘を壊し方で確かめて直す（最大2回）
 - [ ] 【えだ】差分を読んで push する
