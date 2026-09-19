@@ -31,7 +31,7 @@
   - メモ: メッセージは day1 の player_move・player_moved。
 - [x] client の、画面に依存しない部分を作る（⑫⑬）
   - メモ: 届いたメッセージで盤面を更新する処理と、クリックした位置をマスに変える処理を、web-sys を使わないモジュールに分けて、cargo test で確かめる。
-- [ ] client の描画と操作を作る
+- [x] client の描画と操作を作る
   - 完了条件: wasm-pack で client をビルドでき、結果が static/pkg/ に出る
   - メモ: day1 と同じ WASM＋Canvas。盤面・ほかのプレイヤーのカーソル（丸）・接続状態・人数・リセットボタン。左クリックで開き、右クリックで旗。Canvas に描くコードは薄くして、判断は⑫⑬の側に寄せる。接続先は location.host から組み立てる。
   - 足してよい依存: wasm-bindgen・web-sys・js-sys

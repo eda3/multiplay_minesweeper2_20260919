@@ -4,8 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>マルチプレイマインスイーパー</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    #info { margin-bottom: 8px; }
+    #info > * { margin-right: 12px; }
+    #result { font-weight: bold; }
+    /* Canvas は、描いた大きさのまま表示する（クリックの位置を、マスに正しく変えるため） */
+    canvas { display: block; border: 1px solid #444; user-select: none; }
+  </style>
 </head>
 <body>
+  <div id="info">
+    <span id="connection">接続しています…</span>
+    <span id="players"></span>
+    <span id="result"></span>
+    <button id="reset" type="button">リセット</button>
+  </div>
   <canvas id="board"></canvas>
   <script type="module">
     // wasm-pack が static/pkg/ に出す client を読み込む（pkg/ は git に入れない）

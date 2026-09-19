@@ -43,6 +43,25 @@ pub enum ClientMessage {
     },
 }
 
+impl ClientMessage {
+    /// サーバーに送る JSON にする。
+    ///
+    /// ```rust
+    /// use game_core::ClientMessage;
+    ///
+    /// let json = ClientMessage::ToggleFlag { x: 3, y: 4 }.to_json()?;
+    /// assert_eq!(json, r#"{"type":"toggle_flag","x":3,"y":4}"#);
+    /// # Ok::<(), game_core::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// 通常は失敗しない。失敗したときは [`Error::InvalidMessage`]。
+    pub fn to_json(&self) -> Result<String, Error> {
+        serde_json::to_string(self).map_err(|_| Error::InvalidMessage)
+    }
+}
+
 /// クライアントに見せてよい範囲で表した、1マスの状態。地雷かどうかは含まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -197,6 +216,25 @@ pub enum ServerMessage {
     },
 }
 
+impl ServerMessage {
+    /// サーバーから届いた JSON を読む。
+    ///
+    /// ```rust
+    /// use game_core::ServerMessage;
+    ///
+    /// let message = ServerMessage::from_json(r#"{"type":"player_left","player_id":5}"#)?;
+    /// assert_eq!(message, ServerMessage::PlayerLeft { player_id: 5 });
+    /// # Ok::<(), game_core::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// JSON として読めないときや、知らない種類のときは [`Error::InvalidMessage`]。
+    pub fn from_json(text: &str) -> Result<Self, Error> {
+        serde_json::from_str(text).map_err(|_| Error::InvalidMessage)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +294,81 @@ mod tests {
         );
         assert_eq!(json(&ServerMessage::GameReset)?, r#"{"type":"game_reset"}"#);
         Ok(())
+    }
+
+    #[test]
+    fn client_message_to_json_matches_the_wire_format() -> Result<(), Error> {
+        assert_eq!(
+            ClientMessage::RevealCell { x: 1, y: 2 }.to_json()?,
+            r#"{"type":"reveal_cell","x":1,"y":2}"#
+        );
+        assert_eq!(
+            ClientMessage::ResetGame.to_json()?,
+            r#"{"type":"reset_game"}"#
+        );
+        assert_eq!(
+            ClientMessage::PlayerMove { x: 3, y: 4 }.to_json()?,
+            r#"{"type":"player_move","x":3,"y":4}"#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_message_from_json_reads_every_kind() -> Result<(), Error> {
+        let board = BoardView::from_game(&Game::new(1))?;
+        let messages = [
+            ServerMessage::Init {
+                player_id: 7,
+                board,
+            },
+            ServerMessage::PlayerJoined { player_id: 1 },
+            ServerMessage::PlayerLeft { player_id: 1 },
+            ServerMessage::CellsRevealed {
+                cells: vec![RevealedCell {
+                    x: 1,
+                    y: 2,
+                    adjacent: 3,
+                }],
+            },
+            ServerMessage::FlagToggled {
+                x: 1,
+                y: 2,
+                flagged: false,
+            },
+            ServerMessage::GameOver {
+                status: Status::Won,
+                mines: vec![(0, 0), (5, 6)],
+            },
+            ServerMessage::GameReset,
+            ServerMessage::PlayerMoved {
+                player_id: 2,
+                x: 3,
+                y: 4,
+            },
+        ];
+        for message in messages {
+            let json = serde_json::to_string(&message).map_err(|_| Error::InvalidMessage)?;
+            assert_eq!(ServerMessage::from_json(&json)?, message, "{json}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn server_message_from_json_rejects_what_it_cannot_read() {
+        for text in [
+            "",
+            "これはJSONではない",
+            "{}",
+            r#"{"type":"unknown_kind"}"#,
+            r#"{"type":"player_left"}"#,
+            r#"{"type":"player_left","player_id":"five"}"#,
+        ] {
+            assert_eq!(
+                ServerMessage::from_json(text),
+                Err(Error::InvalidMessage),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -12,6 +12,8 @@ pub enum Error {
     },
     /// 勝敗がついたあとに操作された。
     GameOver,
+    /// メッセージの JSON が、読めない・作れない。
+    InvalidMessage,
 }
 
 impl fmt::Display for Error {
@@ -19,6 +21,7 @@ impl fmt::Display for Error {
         match self {
             Self::OutOfBounds { x, y } => write!(f, "座標 ({x}, {y}) は盤面の外です"),
             Self::GameOver => write!(f, "ゲームはすでに終了しています"),
+            Self::InvalidMessage => write!(f, "メッセージの JSON が正しくありません"),
         }
     }
 }
