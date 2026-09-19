@@ -29,7 +29,7 @@
   - 足してよい依存: tower-http（fs）
 - [x] カーソルを中継する（⑪）
   - メモ: メッセージは day1 の player_move・player_moved。
-- [ ] client の、画面に依存しない部分を作る（⑫⑬）
+- [x] client の、画面に依存しない部分を作る（⑫⑬）
   - メモ: 届いたメッセージで盤面を更新する処理と、クリックした位置をマスに変える処理を、web-sys を使わないモジュールに分けて、cargo test で確かめる。
 - [ ] client の描画と操作を作る
   - 完了条件: wasm-pack で client をビルドでき、結果が static/pkg/ に出る
