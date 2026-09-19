@@ -24,7 +24,7 @@
 
 - [x] 【えだ】wasm-pack と wasm32-unknown-unknown ターゲットを入れる
 - [x] ⑨を補強する（勝ったときにも地雷の位置が届く／遊んでいる間に届く値に、地雷の位置が混ざらない）
-- [ ] server がページを配る（⑩）
+- [x] server がページを配る（⑩）
   - メモ: static/index.html は手書きでコミットする。ビルド結果の static/pkg/ は git に入れない（.gitignore に足す）。server は static/ を配る。
   - 足してよい依存: tower-http（fs）
 - [ ] カーソルを中継する（⑪）

@@ -1,6 +1,7 @@
 //! マルチプレイマインスイーパーのサーバー。
 //!
 //! 盤面の正はここが持つ。`/ws` に WebSocket で繋いだ全員が、1つの盤面を共有する。
+//! ページ（`static/`）も、同じポートから配る。
 
 mod room;
 
@@ -11,13 +12,24 @@ use axum::response::Response;
 use axum::routing::get;
 use game_core::{ClientMessage, ServerMessage};
 use room::Room;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
+use tower_http::services::ServeDir;
 
 type SharedRoom = Arc<Mutex<Room>>;
 
-/// `listener` で待ち受け、`/ws` の WebSocket を配る。止まるのは、待ち受けが失敗したときだけ。
+/// ページ（`index.html` と、WASM のビルド結果 `pkg/`）を置いてある場所。ワークスペースの `static/`。
+///
+/// どこから起動しても同じ場所を指すよう、`server` クレートの場所から決める。
+#[must_use]
+pub fn default_static_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../static")
+}
+
+/// `listener` で待ち受け、`/ws` の WebSocket と、`static/` のページを、同じポートから配る。
+/// 止まるのは、待ち受けが失敗したときだけ。
 ///
 /// 盤面の乱数は `seed` から決まる。リセットのたびに `seed` を1ずつ進めた盤面になる。
 ///
@@ -25,8 +37,24 @@ type SharedRoom = Arc<Mutex<Room>>;
 ///
 /// 待ち受けが失敗したとき。
 pub async fn serve(listener: TcpListener, seed: u64) -> anyhow::Result<()> {
+    serve_with_static(listener, seed, default_static_dir()).await
+}
+
+/// [`serve`] と同じだが、ページを置く場所を `static_dir` で指定する。
+///
+/// # Errors
+///
+/// 待ち受けが失敗したとき。
+pub async fn serve_with_static(
+    listener: TcpListener,
+    seed: u64,
+    static_dir: impl AsRef<Path>,
+) -> anyhow::Result<()> {
     let room: SharedRoom = Arc::new(Mutex::new(Room::new(seed)));
-    let app = Router::new().route("/ws", get(ws_handler)).with_state(room);
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .fallback_service(ServeDir::new(static_dir))
+        .with_state(room);
     axum::serve(listener, app).await?;
     Ok(())
 }

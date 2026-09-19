@@ -11,7 +11,9 @@ use game_core::{
 };
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
@@ -677,5 +679,120 @@ async fn item9_mine_positions_are_sent_once_the_game_is_won() -> anyhow::Result<
         c.initial_board.mines.map(|m| m.into_iter().collect()),
         Some(mines)
     );
+    Ok(())
+}
+
+/// HTTP の返事。
+struct HttpResponse {
+    status: u16,
+    content_type: String,
+    body: Vec<u8>,
+}
+
+/// 生の TCP で `GET path` を送り、返事を最後まで読む。
+async fn http_get(addr: SocketAddr, path: &str) -> anyhow::Result<HttpResponse> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    let mut raw = Vec::new();
+    tokio::time::timeout(TIMEOUT, stream.read_to_end(&mut raw))
+        .await
+        .context("返事が時間内に終わらなかった")??;
+
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("ヘッダーの終わりがない")?;
+    let head = std::str::from_utf8(&raw[..split])?;
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
+        .context("ステータス行がない")?
+        .parse()?;
+    let content_type = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.trim().to_owned())
+        .unwrap_or_default();
+    Ok(HttpResponse {
+        status,
+        content_type,
+        body: raw[split + 4..].to_vec(),
+    })
+}
+
+/// ページを置く場所を指定してサーバーを立てる。
+async fn start_server_with_static(seed: u64, static_dir: PathBuf) -> anyhow::Result<SocketAddr> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(server::serve_with_static(listener, seed, static_dir));
+    Ok(addr)
+}
+
+/// ⑩: ページ（`index.html` と WASM）と WebSocket が、同じポートから届く
+#[tokio::test]
+async fn item10_page_wasm_and_websocket_are_served_from_the_same_port() -> anyhow::Result<()> {
+    // 置き場は、テストごとに一時フォルダへ作る（本物の pkg/ は、ビルドしないと無いため）
+    let dir = std::env::temp_dir().join(format!("minesweeper-item10-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("pkg"))?;
+    let index = b"<!doctype html><title>test page</title>";
+    let glue = b"export default function init() {}";
+    let wasm = b"\0asm\x01\0\0\0";
+    std::fs::write(dir.join("index.html"), index)?;
+    std::fs::write(dir.join("pkg/client.js"), glue)?;
+    std::fs::write(dir.join("pkg/client_bg.wasm"), wasm)?;
+
+    let addr = start_server_with_static(SEED, dir.clone()).await?;
+
+    // ページ。`/` でも `/index.html` でも届く
+    for path in ["/", "/index.html"] {
+        let page = http_get(addr, path).await?;
+        assert_eq!(page.status, 200, "{path}");
+        assert!(page.content_type.starts_with("text/html"), "{path}");
+        assert_eq!(page.body, index, "{path}");
+    }
+    // WASM と、それを読み込む JS。ブラウザが WASM を読み込めるよう、種類が正しく伝わる
+    let script = http_get(addr, "/pkg/client.js").await?;
+    assert_eq!(script.status, 200);
+    assert!(script.content_type.contains("javascript"));
+    assert_eq!(script.body, glue);
+    let module = http_get(addr, "/pkg/client_bg.wasm").await?;
+    assert_eq!(module.status, 200);
+    assert_eq!(module.content_type, "application/wasm");
+    assert_eq!(module.body, wasm);
+    // ないものは 404
+    assert_eq!(http_get(addr, "/pkg/nothing.js").await?.status, 404);
+
+    // 同じポートに、WebSocket も繋がる（ページを配っても、`/ws` は塞がれていない）
+    let bot = Bot::join(addr).await?;
+    assert_eq!(bot.initial_board, BoardView::from_game(&Game::new(SEED))?);
+
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// ⑩: 本物の `static/` にある `index.html` が、`serve` の同じポートから届き、WASM の置き場（`pkg/`）を読み込む
+#[tokio::test]
+async fn item10_the_real_index_html_is_served_and_loads_the_wasm_from_pkg() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(server::serve(listener, SEED));
+
+    let page = http_get(addr, "/").await?;
+    assert_eq!(page.status, 200);
+    assert!(page.content_type.starts_with("text/html"));
+    assert_eq!(
+        page.body,
+        std::fs::read(server::default_static_dir().join("index.html"))?
+    );
+    let html = String::from_utf8(page.body)?;
+    assert!(
+        html.contains("./pkg/client.js"),
+        "pkg/ の JS を読み込んでいない"
+    );
+
+    // 同じポートに WebSocket も繋がる
+    Bot::join(addr).await?;
     Ok(())
 }
