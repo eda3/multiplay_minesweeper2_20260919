@@ -35,6 +35,8 @@ struct Bot {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     player_id: u32,
     initial_board: BoardView,
+    /// これまでに受け取ったメッセージの生のJSON。
+    log: Vec<String>,
 }
 
 impl Bot {
@@ -46,6 +48,7 @@ impl Bot {
             ws,
             player_id: 0,
             initial_board: BoardView::from_game(&Game::new(0))?,
+            log: Vec::new(),
         };
         match bot.recv().await? {
             ServerMessage::Init { player_id, board } => {
@@ -71,7 +74,10 @@ impl Bot {
             .await
             .context("メッセージが時間内に届かなかった")?;
         match next.context("接続が閉じた")?? {
-            Message::Text(text) => Ok(serde_json::from_str(&text)?),
+            Message::Text(text) => {
+                self.log.push(text.to_string());
+                Ok(serde_json::from_str(&text)?)
+            }
             other => bail!("テキスト以外が届いた: {other:?}"),
         }
     }
@@ -407,5 +413,153 @@ async fn item8_late_joiner_receives_a_won_game() -> anyhow::Result<()> {
     let c = Bot::join(a.addr).await?;
     assert_eq!(c.initial_board.status, Status::Won);
     assert_board_shows(&c.initial_board, &local)?;
+    Ok(())
+}
+
+/// 地雷のある座標すべて。
+fn mines_of(game: &Game) -> anyhow::Result<BTreeSet<(usize, usize)>> {
+    let mut mines = BTreeSet::new();
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            if game.is_mine(x, y)? {
+                mines.insert((x, y));
+            }
+        }
+    }
+    Ok(mines)
+}
+
+/// JSON の項目名が `expected` と過不足なく一致することを確かめる。
+fn assert_keys(value: &serde_json::Value, expected: &[&str]) {
+    let mut actual: Vec<&str> = value
+        .as_object()
+        .map(|object| object.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    actual.sort_unstable();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    assert_eq!(actual, expected, "{value}");
+}
+
+/// 勝敗がつくまでに届いてよいメッセージの形かを確かめ、その種類を返す。
+/// 届いてよい項目名を決め打ちにして、地雷の位置を運びうる項目がどこにもないことを確かめる。
+fn assert_safe_while_playing(raw: &str) -> anyhow::Result<String> {
+    let message: serde_json::Value = serde_json::from_str(raw)?;
+    let kind = message["type"].as_str().context("type がない")?;
+    match kind {
+        "init" => {
+            assert_keys(&message, &["type", "player_id", "board"]);
+            let board = &message["board"];
+            assert_keys(board, &["cells", "status"]);
+            assert_eq!(board["status"], "playing", "{raw}");
+            for cell in board["cells"].as_array().context("cells がない")? {
+                match cell["state"].as_str() {
+                    Some("hidden" | "flagged") => assert_keys(cell, &["state"]),
+                    Some("open") => assert_keys(cell, &["state", "adjacent"]),
+                    other => bail!("知らないマスの状態 {other:?}: {raw}"),
+                }
+            }
+        }
+        "player_joined" | "player_left" => assert_keys(&message, &["type", "player_id"]),
+        "cells_revealed" => {
+            assert_keys(&message, &["type", "cells"]);
+            for cell in message["cells"].as_array().context("cells がない")? {
+                assert_keys(cell, &["x", "y", "adjacent"]);
+            }
+        }
+        "flag_toggled" => assert_keys(&message, &["type", "x", "y", "flagged"]),
+        "game_reset" => assert_keys(&message, &["type"]),
+        other => bail!("勝敗がつく前に {other} が届いた: {raw}"),
+    }
+    Ok(kind.to_owned())
+}
+
+/// 最後に届いた `game_over` の勝敗と、そこに書かれた地雷の位置。
+fn last_game_over(bot: &Bot) -> anyhow::Result<(Status, BTreeSet<(usize, usize)>)> {
+    match serde_json::from_str(bot.log.last().context("何も届いていない")?)? {
+        ServerMessage::GameOver { status, mines } => Ok((status, mines.into_iter().collect())),
+        other => bail!("最後に game_over が届くはずが、{other:?} が届いた"),
+    }
+}
+
+/// ⑨: 勝敗がつくまで、地雷の位置はどのクライアントにも送らない
+#[tokio::test]
+async fn item9_no_mine_positions_are_sent_while_playing() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    b.expect_revealed().await?;
+
+    // 地雷のマスにも旗は立てられる。サーバーの返事から、地雷かどうかは分からない
+    let (mx, my) = *mines_of(&local)?.first().context("地雷がない")?;
+    local.toggle_flag(mx, my)?;
+    b.send(ClientMessage::ToggleFlag { x: mx, y: my }).await?;
+    a.expect_flag(mx, my, true).await?;
+    b.expect_flag(mx, my, true).await?;
+
+    // B が安全なマスを開く
+    let (safe_x, safe_y) = hidden_safe_cell(&local)?;
+    reveal_as(&mut b, &mut local, safe_x, safe_y).await?;
+    a.expect_revealed().await?;
+
+    // 途中から C が入る。C の init にも、地雷の位置はない
+    let mut c = Bot::join(a.addr).await?;
+    let joined = ServerMessage::PlayerJoined {
+        player_id: c.player_id,
+    };
+    assert_eq!(a.recv().await?, joined);
+    assert_eq!(b.recv().await?, joined);
+
+    // リセットして、新しい盤面でも開く
+    c.send(ClientMessage::ResetGame).await?;
+    for bot in [&mut a, &mut b, &mut c] {
+        assert_eq!(bot.recv().await?, ServerMessage::GameReset);
+    }
+    a.send(ClientMessage::RevealCell { x: 8, y: 8 }).await?;
+    for bot in [&mut a, &mut b, &mut c] {
+        bot.expect_revealed().await?;
+    }
+
+    // 3人が受け取った全メッセージが、地雷の位置を運ばない形をしている
+    let mut kinds = BTreeSet::new();
+    for bot in [&a, &b, &c] {
+        for raw in &bot.log {
+            kinds.insert(assert_safe_while_playing(raw)?);
+        }
+    }
+    // 上の確認が空振りしないよう、いろいろな種類のメッセージを見たことも確かめる
+    for kind in [
+        "init",
+        "player_joined",
+        "cells_revealed",
+        "flag_toggled",
+        "game_reset",
+    ] {
+        assert!(kinds.contains(kind), "{kind} を見ていない: {kinds:?}");
+    }
+    Ok(())
+}
+
+/// ⑨: 負けて勝敗がついたら、地雷の位置が届く（その場にいる人にも、あとから入った人にも）
+#[tokio::test]
+async fn item9_mine_positions_are_sent_once_the_game_is_lost() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    b.expect_revealed().await?;
+    let mines = mines_of(&local)?;
+    assert_eq!(mines.len(), game_core::MINE_COUNT);
+
+    let &(mx, my) = mines.first().context("地雷がない")?;
+    assert_eq!(reveal_as(&mut a, &mut local, mx, my).await?, Status::Lost);
+    b.recv().await?;
+
+    assert_eq!(last_game_over(&a)?, (Status::Lost, mines.clone()));
+    assert_eq!(last_game_over(&b)?, (Status::Lost, mines.clone()));
+    let c = Bot::join(a.addr).await?;
+    assert_eq!(
+        c.initial_board.mines.map(|m| m.into_iter().collect()),
+        Some(mines)
+    );
     Ok(())
 }
