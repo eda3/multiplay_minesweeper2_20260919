@@ -246,6 +246,7 @@ fn neighbors(x: usize, y: usize) -> impl Iterator<Item = (usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     /// 地雷の位置を指定した、地雷配置済みの盤面を作る。
     fn game_with_mines(mines: &[(usize, usize)]) -> Game {
@@ -263,6 +264,70 @@ mod tests {
 
     fn all_coordinates() -> impl Iterator<Item = (usize, usize)> {
         (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+    }
+
+    /// 地雷のある座標の一覧。
+    fn mine_positions(game: &Game) -> Vec<(usize, usize)> {
+        all_coordinates()
+            .filter(|&(x, y)| game.cells[Game::at(x, y)].mine)
+            .collect()
+    }
+
+    /// `(x, y)` の周り8マスの地雷の数。期待値用なので、実装の `neighbors` は使わず、
+    /// 「縦横とも距離が1以内で、自分ではない」という条件で数える。
+    fn count_mines_around(mines: &[(usize, usize)], x: usize, y: usize) -> usize {
+        mines
+            .iter()
+            .filter(|&&(mx, my)| (mx, my) != (x, y) && mx.abs_diff(x) <= 1 && my.abs_diff(y) <= 1)
+            .count()
+    }
+
+    /// 地雷ではない `start` を開いたときに開くはずのマス。期待値用なので、実装の `open_area` は使わず、
+    /// 「数字が0のマスなら周り8マスも開く」を素直に繰り返して求める。
+    fn expected_open(mines: &[(usize, usize)], start: (usize, usize)) -> HashSet<(usize, usize)> {
+        let mut opened = HashSet::new();
+        let mut pending = vec![start];
+        while let Some((x, y)) = pending.pop() {
+            if !opened.insert((x, y)) {
+                continue;
+            }
+            if count_mines_around(mines, x, y) == 0 {
+                pending.extend(all_coordinates().filter(|&(nx, ny)| {
+                    (nx, ny) != (x, y) && nx.abs_diff(x) <= 1 && ny.abs_diff(y) <= 1
+                }));
+            }
+        }
+        opened
+    }
+
+    /// 地雷配置済みの盤面で `start` を開き、開いたマスが独立に求めた期待値と一致することを確かめる。
+    fn assert_open_matches_expected(
+        mines: &[(usize, usize)],
+        start: (usize, usize),
+    ) -> Result<(), Error> {
+        let mut game = game_with_mines(mines);
+        game.open(start.0, start.1)?;
+        let expected = expected_open(mines, start);
+        for (x, y) in all_coordinates() {
+            let is_open = game.state(x, y)? == CellState::Open;
+            assert_eq!(
+                is_open,
+                expected.contains(&(x, y)),
+                "start={start:?} ({x}, {y})"
+            );
+            assert!(
+                !(is_open && mines.contains(&(x, y))),
+                "地雷が開いた ({x}, {y})"
+            );
+        }
+        let all_safe_open = expected.len() == WIDTH * HEIGHT - mines.len();
+        let status = if all_safe_open {
+            Status::Won
+        } else {
+            Status::Playing
+        };
+        assert_eq!(game.status(), status, "start={start:?}");
+        Ok(())
     }
 
     /// ①: 地雷がちょうど40個
@@ -326,6 +391,46 @@ mod tests {
             .filter(|&(x, y)| game.cells[Game::at(x, y)].state == CellState::Open)
             .count();
         assert_eq!(opened, 1);
+
+        // 周り8マスのうち、どの向きの隣に1個だけ置いても数える
+        for (mx, my) in [
+            (4, 4),
+            (5, 4),
+            (6, 4),
+            (4, 5),
+            (6, 5),
+            (4, 6),
+            (5, 6),
+            (6, 6),
+        ] {
+            let game = game_with_mines(&[(mx, my)]);
+            assert_eq!(game.adjacent_mines(5, 5)?, 1, "隣の地雷 ({mx}, {my})");
+        }
+
+        // 自分以外がすべて地雷。3×3 のうち盤の内側にある数から自分を引いた数になる
+        // （角は3、辺は5、内側は8。盤の四辺のどこでも数え落とさない）
+        for (x, y) in all_coordinates() {
+            let others: Vec<(usize, usize)> = all_coordinates().filter(|&p| p != (x, y)).collect();
+            let game = game_with_mines(&others);
+            let columns = if x == 0 || x == WIDTH - 1 { 2 } else { 3 };
+            let rows = if y == 0 || y == HEIGHT - 1 { 2 } else { 3 };
+            assert_eq!(game.adjacent_mines(x, y)?, columns * rows - 1, "({x}, {y})");
+        }
+
+        // 複数シードの盤面で、全マスの数字を独立に数えた値と比べる
+        for seed in 0..30 {
+            let mut game = Game::new(seed);
+            game.open(8, 8)?;
+            let mines = mine_positions(&game);
+            for (x, y) in all_coordinates() {
+                let expected = count_mines_around(&mines, x, y);
+                assert_eq!(
+                    game.adjacent_mines(x, y)?,
+                    expected,
+                    "seed={seed} ({x}, {y})"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -345,12 +450,30 @@ mod tests {
                 }
                 7 => {
                     assert_eq!(state, CellState::Open, "縁の数字 ({x}, {y})");
-                    assert!(game.adjacent_mines(x, y)? > 0);
+                    // 壁の隣。上下の端は地雷が2個、それ以外は3個
+                    let number = if y == 0 || y == HEIGHT - 1 { 2 } else { 3 };
+                    assert_eq!(game.adjacent_mines(x, y)?, number, "縁の数字 ({x}, {y})");
                 }
                 _ => assert_eq!(state, CellState::Hidden, "地雷の壁の向こう ({x}, {y})"),
             }
             if game.is_mine(x, y)? {
                 assert_ne!(state, CellState::Open, "地雷が開いた ({x}, {y})");
+            }
+        }
+
+        // 斜めにしかつながらない縁の数字 (6, 6) も開く。(5, 5) は0で、
+        // (6, 6) の上下左右は (6, 5) (5, 6) (6, 7) が数字、(7, 6) が地雷になっている
+        assert_open_matches_expected(&[(7, 6), (4, 7)], (5, 5))?;
+
+        // 複数シードの盤面で、開いたマスの集合を独立に求めた期待値と比べる
+        for seed in 0..30 {
+            let mut game = Game::new(seed);
+            game.open(8, 8)?;
+            let mines = mine_positions(&game);
+            for start in [(8, 8), (0, 0), (15, 0), (0, 15), (15, 15)] {
+                if !mines.contains(&start) {
+                    assert_open_matches_expected(&mines, start)?;
+                }
             }
         }
         Ok(())
@@ -381,36 +504,86 @@ mod tests {
     /// ⑥: 地雷を開いたら負け
     #[test]
     fn item6_opening_a_mine_loses() -> Result<(), Error> {
-        let mut game = Game::new(7);
-        game.open(8, 8)?;
-        let (mx, my) = all_coordinates()
-            .find(|&(x, y)| game.cells[Game::at(x, y)].mine)
-            .expect("地雷は40個ある");
-        assert_eq!(game.open(mx, my)?, Status::Lost);
-        assert_eq!(game.status(), Status::Lost);
-        // 負けたあとは操作できない
-        assert_eq!(game.open(0, 0), Err(Error::GameOver));
-        assert_eq!(game.toggle_flag(0, 0), Err(Error::GameOver));
+        // 複数シード・2通りの最初の一手で、どの地雷を開いても負ける
+        for seed in 0..30 {
+            for (sx, sy) in [(8, 8), (0, 0)] {
+                let mut board = Game::new(seed);
+                board.open(sx, sy)?;
+                for (mx, my) in mine_positions(&board) {
+                    let mut game = board.clone();
+                    let at = format!("seed={seed} start=({sx}, {sy}) mine=({mx}, {my})");
+                    assert_eq!(game.open(mx, my)?, Status::Lost, "{at}");
+                    assert_eq!(game.status(), Status::Lost, "{at}");
+                    assert_eq!(game.state(mx, my)?, CellState::Open, "{at}");
+                    // 負けたあとは操作できない
+                    assert_eq!(game.open(0, 0), Err(Error::GameOver), "{at}");
+                    assert_eq!(game.toggle_flag(0, 0), Err(Error::GameOver), "{at}");
+                }
+            }
+        }
         Ok(())
     }
 
     /// ⑥: 地雷以外をすべて開いたら勝ち（1マス残っている間は勝ちにならない）
     #[test]
     fn item6_opening_all_safe_cells_wins() -> Result<(), Error> {
-        let mut game = Game::new(7);
-        game.open(8, 8)?;
-        let safe: Vec<(usize, usize)> = all_coordinates()
-            .filter(|&(x, y)| !game.cells[Game::at(x, y)].mine)
-            .collect();
-        assert_eq!(safe.len(), WIDTH * HEIGHT - MINE_COUNT);
-        let (last, rest) = safe.split_last().expect("安全なマスがある");
-        for &(x, y) in rest {
-            assert_eq!(game.open(x, y)?, Status::Playing, "({x}, {y})");
+        for seed in 0..30 {
+            let mut game = Game::new(seed);
+            game.open(8, 8)?;
+            let mines = mine_positions(&game);
+            let safe: Vec<(usize, usize)> =
+                all_coordinates().filter(|p| !mines.contains(p)).collect();
+            assert_eq!(safe.len(), WIDTH * HEIGHT - MINE_COUNT);
+            for &(x, y) in &safe {
+                // 0の広がりで先に開いたマスは飛ばす（最後の安全マスが先に開いていてもエラーにしない）
+                if game.state(x, y)? == CellState::Open {
+                    continue;
+                }
+                let status = game.open(x, y)?;
+                let all_open = safe
+                    .iter()
+                    .all(|&(sx, sy)| game.state(sx, sy) == Ok(CellState::Open));
+                assert_eq!(status == Status::Won, all_open, "seed={seed} ({x}, {y})");
+            }
+            assert_eq!(game.status(), Status::Won, "seed={seed}");
+            // 勝ったあとは操作できない
+            assert_eq!(game.open(0, 0), Err(Error::GameOver), "seed={seed}");
         }
-        assert_eq!(game.open(last.0, last.1)?, Status::Won);
-        assert_eq!(game.status(), Status::Won);
-        // 勝ったあとは操作できない
-        assert_eq!(game.open(0, 0), Err(Error::GameOver));
+        Ok(())
+    }
+
+    /// ⑥: 旗を立てた安全マスが残っている間は、ほかをすべて開いても勝ちにならない
+    #[test]
+    fn item6_flagged_safe_cell_blocks_the_win() -> Result<(), Error> {
+        for seed in 0..30 {
+            let mut game = Game::new(seed);
+            game.open(8, 8)?;
+            let mines = mine_positions(&game);
+            let safe: Vec<(usize, usize)> =
+                all_coordinates().filter(|p| !mines.contains(p)).collect();
+            // まだ閉じている安全マスのうち1つに旗を立てる
+            let (fx, fy) = *safe
+                .iter()
+                .rev()
+                .find(|&&(x, y)| game.state(x, y) == Ok(CellState::Hidden))
+                .expect("最初の一手のあとにも、閉じた安全マスが残っている");
+            game.toggle_flag(fx, fy)?;
+            for &(x, y) in &safe {
+                if game.state(x, y)? != CellState::Hidden {
+                    continue;
+                }
+                let status = game.open(x, y)?;
+                assert_eq!(status, Status::Playing, "seed={seed} ({x}, {y})");
+            }
+            assert_eq!(game.state(fx, fy)?, CellState::Flagged, "seed={seed}");
+            let opened = safe
+                .iter()
+                .filter(|&&(x, y)| game.state(x, y) == Ok(CellState::Open));
+            assert_eq!(opened.count(), safe.len() - 1, "seed={seed}");
+            // 旗を取り消して最後の1マスを開くと勝つ
+            assert_eq!(game.toggle_flag(fx, fy)?, CellState::Hidden);
+            assert_eq!(game.open(fx, fy)?, Status::Won, "seed={seed}");
+        }
         Ok(())
     }
 
