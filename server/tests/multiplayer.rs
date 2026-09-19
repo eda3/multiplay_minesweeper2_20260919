@@ -563,3 +563,119 @@ async fn item9_mine_positions_are_sent_once_the_game_is_lost() -> anyhow::Result
     );
     Ok(())
 }
+
+/// `(x, y)` の周り8マスにある地雷の数。期待値用なので、`game_core` の数え方は使わない。
+fn mines_around(mines: &BTreeSet<(usize, usize)>, x: usize, y: usize) -> usize {
+    mines
+        .iter()
+        .filter(|&&(mx, my)| (mx, my) != (x, y) && mx.abs_diff(x) <= 1 && my.abs_diff(y) <= 1)
+        .count()
+}
+
+/// 遊んでいる間に届いた値（`cells_revealed` の開いたマスと、`init` の盤面の開いたマス）に、
+/// 地雷の位置が混ざっていないことを確かめる。開いたマスは地雷ではなく、数字は周りの地雷の数と一致する。
+/// 確かめたマスの数を返す。
+fn assert_values_hide_mines(
+    log: &[String],
+    mines: &BTreeSet<(usize, usize)>,
+) -> anyhow::Result<usize> {
+    let mut checked = 0;
+    for raw in log {
+        let shown: Vec<Opened> = match serde_json::from_str(raw)? {
+            ServerMessage::CellsRevealed { cells } => cells.iter().map(opened).collect(),
+            ServerMessage::Init { board, .. } => board
+                .cells
+                .iter()
+                .enumerate()
+                .filter_map(|(i, cell)| match cell {
+                    CellView::Open { adjacent } => Some((i % WIDTH, i / WIDTH, *adjacent)),
+                    _ => None,
+                })
+                .collect(),
+            _ => continue,
+        };
+        for (x, y, adjacent) in shown {
+            assert!(
+                !mines.contains(&(x, y)),
+                "地雷のマスが開いたと届いた ({x}, {y}): {raw}"
+            );
+            assert_eq!(adjacent, mines_around(mines, x, y), "({x}, {y}): {raw}");
+            checked += 1;
+        }
+    }
+    Ok(checked)
+}
+
+/// ⑨: 遊んでいる間に届く値に、地雷の位置が混ざらない
+#[tokio::test]
+async fn item9_values_sent_while_playing_do_not_reveal_mines() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    b.expect_revealed().await?;
+    let mines = mines_of(&local)?;
+
+    // 地雷のマスと安全なマスの両方に旗を立てる。返事は同じ形で、見分けがつかない
+    let mine = *mines.first().context("地雷がない")?;
+    let safe = hidden_safe_cell(&local)?;
+    for (flag_x, flag_y) in [mine, safe] {
+        local.toggle_flag(flag_x, flag_y)?;
+        b.send(ClientMessage::ToggleFlag {
+            x: flag_x,
+            y: flag_y,
+        })
+        .await?;
+        a.expect_flag(flag_x, flag_y, true).await?;
+        b.expect_flag(flag_x, flag_y, true).await?;
+    }
+    // 旗のない安全なマスを、いくつか開く
+    for _ in 0..3 {
+        let (open_x, open_y) = hidden_safe_cell(&local)?;
+        reveal_as(&mut a, &mut local, open_x, open_y).await?;
+        b.expect_revealed().await?;
+    }
+
+    // 途中から入った C の盤面でも、地雷のマスは、ほかの閉じたマスと同じに見える
+    let c = Bot::join(a.addr).await?;
+    assert_board_shows(&c.initial_board, &local)?;
+
+    let mut checked = 0;
+    for bot in [&a, &b, &c] {
+        checked += assert_values_hide_mines(&bot.log, &mines)?;
+    }
+    // 上の確認が空振りしないよう、たくさんのマスを確かめたことを確かめる
+    assert!(checked >= 50, "確かめたマスが少ない: {checked}");
+    Ok(())
+}
+
+/// ⑨: 勝って勝敗がついたら、地雷の位置が届く（その場にいる人にも、あとから入った人にも）
+#[tokio::test]
+async fn item9_mine_positions_are_sent_once_the_game_is_won() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    for row in 0..HEIGHT {
+        for col in 0..WIDTH {
+            if local.is_mine(col, row)? || local.state(col, row)? != CellState::Hidden {
+                continue;
+            }
+            reveal_as(&mut a, &mut local, col, row).await?;
+        }
+    }
+    assert_eq!(local.status(), Status::Won);
+    let mines = mines_of(&local)?;
+    assert_eq!(mines.len(), game_core::MINE_COUNT);
+
+    // B には途中のメッセージがたまっている。game_over まで読み進める
+    while !matches!(b.recv().await?, ServerMessage::GameOver { .. }) {}
+
+    assert_eq!(last_game_over(&a)?, (Status::Won, mines.clone()));
+    assert_eq!(last_game_over(&b)?, (Status::Won, mines.clone()));
+    let c = Bot::join(a.addr).await?;
+    assert_eq!(c.initial_board.status, Status::Won);
+    assert_eq!(
+        c.initial_board.mines.map(|m| m.into_iter().collect()),
+        Some(mines)
+    );
+    Ok(())
+}
