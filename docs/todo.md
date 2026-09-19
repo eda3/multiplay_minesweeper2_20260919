@@ -27,7 +27,7 @@
 - [x] server がページを配る（⑩）
   - メモ: static/index.html は手書きでコミットする。ビルド結果の static/pkg/ は git に入れない（.gitignore に足す）。server は static/ を配る。
   - 足してよい依存: tower-http（fs）
-- [ ] カーソルを中継する（⑪）
+- [x] カーソルを中継する（⑪）
   - メモ: メッセージは day1 の player_move・player_moved。
 - [ ] client の、画面に依存しない部分を作る（⑫⑬）
   - メモ: 届いたメッセージで盤面を更新する処理と、クリックした位置をマスに変える処理を、web-sys を使わないモジュールに分けて、cargo test で確かめる。

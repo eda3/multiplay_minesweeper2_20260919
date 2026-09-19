@@ -796,3 +796,66 @@ async fn item10_the_real_index_html_is_served_and_loads_the_wasm_from_pkg() -> a
     Bot::join(addr).await?;
     Ok(())
 }
+
+/// ⑪: カーソルの位置が、ほかのプレイヤーに届く（動かした本人には返らない）
+#[tokio::test]
+async fn item11_cursor_position_reaches_the_other_players() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut c = Bot::join(a.addr).await?;
+    let joined = ServerMessage::PlayerJoined {
+        player_id: c.player_id,
+    };
+    assert_eq!(a.recv().await?, joined);
+    assert_eq!(b.recv().await?, joined);
+
+    // A が動かすと、B と C に、A の番号つきで届く。動かした順に届く
+    for (cx, cy) in [(1, 1), (2, 1), (2, 2)] {
+        a.send(ClientMessage::PlayerMove { x: cx, y: cy }).await?;
+        let moved = ServerMessage::PlayerMoved {
+            player_id: a.player_id,
+            x: cx,
+            y: cy,
+        };
+        assert_eq!(b.recv().await?, moved);
+        assert_eq!(c.recv().await?, moved);
+    }
+    // B が動かすと、A と C に、B の番号つきで届く（盤面の端でも届く）
+    b.send(ClientMessage::PlayerMove {
+        x: WIDTH - 1,
+        y: HEIGHT - 1,
+    })
+    .await?;
+    let moved = ServerMessage::PlayerMoved {
+        player_id: b.player_id,
+        x: WIDTH - 1,
+        y: HEIGHT - 1,
+    };
+    assert_eq!(a.recv().await?, moved);
+    assert_eq!(c.recv().await?, moved);
+
+    // 動かした本人には返らない。次に届くのは、続けて出した旗の操作の結果になる
+    a.send(ClientMessage::ToggleFlag { x: 0, y: 0 }).await?;
+    a.expect_flag(0, 0, true).await?;
+    b.expect_flag(0, 0, true).await?;
+    c.expect_flag(0, 0, true).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cursor_outside_the_board_is_ignored() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    a.send(ClientMessage::PlayerMove { x: WIDTH, y: 0 }).await?;
+    a.send(ClientMessage::PlayerMove { x: 0, y: HEIGHT })
+        .await?;
+    a.send(ClientMessage::PlayerMove { x: 3, y: 3 }).await?;
+    // 盤面の外への移動は中継されず、続けて出した正しい移動だけが届く
+    assert_eq!(
+        b.recv().await?,
+        ServerMessage::PlayerMoved {
+            player_id: a.player_id,
+            x: 3,
+            y: 3
+        }
+    );
+    Ok(())
+}

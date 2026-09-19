@@ -1,4 +1,6 @@
-use game_core::{BoardView, CellState, ClientMessage, Error, Game, ServerMessage, Status};
+use game_core::{
+    BoardView, CellState, ClientMessage, Error, Game, HEIGHT, ServerMessage, Status, WIDTH,
+};
 use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -38,13 +40,21 @@ impl Room {
         self.broadcast(&ServerMessage::PlayerLeft { player_id });
     }
 
-    /// 操作を盤面に反映し、結果を全員に送る。
+    /// `player_id` の人の操作を盤面に反映し、結果を全員に送る。
     ///
     /// # Errors
     ///
-    /// `game_core` が断った操作（盤面の外・勝敗がついたあと）。盤面は変わらず、誰にも送らない。
-    pub fn handle(&mut self, message: ClientMessage) -> Result<(), Error> {
+    /// `game_core` が断った操作（盤面の外・勝敗がついたあと）や、盤面の外へのカーソルの移動。
+    /// 盤面は変わらず、誰にも送らない。
+    pub fn handle(&mut self, player_id: u32, message: ClientMessage) -> Result<(), Error> {
         match message {
+            ClientMessage::PlayerMove { x, y } => {
+                if x >= WIDTH || y >= HEIGHT {
+                    return Err(Error::OutOfBounds { x, y });
+                }
+                self.broadcast_others(player_id, &ServerMessage::PlayerMoved { player_id, x, y });
+                Ok(())
+            }
             ClientMessage::RevealCell { x, y } => self.reveal(x, y),
             ClientMessage::ToggleFlag { x, y } => {
                 match self.game.toggle_flag(x, y)? {
@@ -99,6 +109,13 @@ impl Room {
     /// 繋がっている全員（操作した本人も含む）に送る。切れている人には届かないが、放っておく。
     fn broadcast(&self, message: &ServerMessage) {
         for tx in self.players.values() {
+            let _ = tx.send(message.clone());
+        }
+    }
+
+    /// `except` の人以外の、繋がっている全員に送る。
+    fn broadcast_others(&self, except: u32, message: &ServerMessage) {
+        for (_, tx) in self.players.iter().filter(|&(&id, _)| id != except) {
             let _ = tx.send(message.clone());
         }
     }

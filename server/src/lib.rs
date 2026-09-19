@@ -69,7 +69,7 @@ async fn handle_socket(socket: WebSocket, room: SharedRoom) {
         return;
     };
     // 途中で切れたときも、部屋から抜ける処理は必ず通す
-    let _ = pump(socket, rx, &room).await;
+    let _ = pump(socket, rx, &room, player_id).await;
     room.lock().await.leave(player_id);
 }
 
@@ -78,6 +78,7 @@ async fn pump(
     mut socket: WebSocket,
     mut rx: mpsc::UnboundedReceiver<ServerMessage>,
     room: &SharedRoom,
+    player_id: u32,
 ) -> anyhow::Result<()> {
     loop {
         tokio::select! {
@@ -89,7 +90,7 @@ async fn pump(
                 Some(Message::Text(text)) => {
                     // 読めない操作と、game_core が断った操作は、サーバーを止めずに無視する
                     if let Ok(message) = serde_json::from_str::<ClientMessage>(&text) {
-                        let _ = room.lock().await.handle(message);
+                        let _ = room.lock().await.handle(player_id, message);
                     }
                 }
                 Some(Message::Close(_)) | None => return Ok(()),

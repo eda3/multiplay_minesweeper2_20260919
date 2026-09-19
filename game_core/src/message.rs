@@ -34,6 +34,13 @@ pub enum ClientMessage {
     },
     /// 盤面を新しく作り直す。
     ResetGame,
+    /// カーソルがマス `(x, y)` の上に動いた。
+    PlayerMove {
+        /// 列。
+        x: usize,
+        /// 行。
+        y: usize,
+    },
 }
 
 /// クライアントに見せてよい範囲で表した、1マスの状態。地雷かどうかは含まない。
@@ -179,6 +186,15 @@ pub enum ServerMessage {
     },
     /// 盤面が新しく作り直された。全マスが閉じた状態に戻る。
     GameReset,
+    /// ほかの人のカーソルが、マス `(x, y)` の上に動いた（動いた本人には送らない）。
+    PlayerMoved {
+        /// 動かした人の番号。
+        player_id: u32,
+        /// 列。
+        x: usize,
+        /// 行。
+        y: usize,
+    },
 }
 
 #[cfg(test)]
@@ -239,6 +255,23 @@ mod tests {
             r#"{"type":"game_over","status":"lost","mines":[[1,2]]}"#
         );
         assert_eq!(json(&ServerMessage::GameReset)?, r#"{"type":"game_reset"}"#);
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_messages_use_snake_case_type_names() -> Result<(), serde_json::Error> {
+        assert_eq!(
+            json(&ClientMessage::PlayerMove { x: 3, y: 4 })?,
+            r#"{"type":"player_move","x":3,"y":4}"#
+        );
+        assert_eq!(
+            json(&ServerMessage::PlayerMoved {
+                player_id: 5,
+                x: 3,
+                y: 4
+            })?,
+            r#"{"type":"player_moved","player_id":5,"x":3,"y":4}"#
+        );
         Ok(())
     }
 
