@@ -505,6 +505,31 @@ mod tests {
         Ok(())
     }
 
+    /// ⑤: 旗を立てたマスを、盤面が空のうちに最初の一手として開こうとしても、何も起きず、地雷も置かれない
+    /// （地雷は、旗のない本当の最初の一手のときに、その手を避けて置かれる）
+    #[test]
+    fn item5_flagged_cell_as_the_first_move_places_no_mines() -> Result<(), Error> {
+        for seed in 0..20 {
+            let mut game = Game::new(seed);
+            assert_eq!(game.toggle_flag(8, 8)?, CellState::Flagged);
+            assert_eq!(game.open(8, 8)?, Status::Playing, "seed={seed}");
+            assert_eq!(game.state(8, 8)?, CellState::Flagged, "seed={seed}");
+            assert_eq!(
+                mine_count(&game),
+                0,
+                "seed={seed}: 旗のマスを開こうとしただけで、地雷が置かれた"
+            );
+
+            // そのあとの本当の最初の一手（左上の角）は、その手とその周りを避けて、地雷が置かれる
+            assert_eq!(game.open(0, 0)?, Status::Playing, "seed={seed}");
+            assert_eq!(mine_count(&game), MINE_COUNT, "seed={seed}");
+            for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                assert!(!game.is_mine(x, y)?, "seed={seed} ({x}, {y})");
+            }
+        }
+        Ok(())
+    }
+
     /// ⑥: 地雷を開いたら負け
     #[test]
     fn item6_opening_a_mine_loses() -> Result<(), Error> {

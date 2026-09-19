@@ -1,5 +1,14 @@
 use game_core::{HEIGHT, WIDTH};
 
+/// 1マスの一辺（画面上の画素数）。
+pub const CELL_PIXELS: u32 = 32;
+
+/// マス `cells` 個ぶんの、画面上の画素数。盤面を描く Canvas の大きさは、これで決める。
+#[must_use]
+pub fn board_pixels(cells: usize) -> u32 {
+    CELL_PIXELS * u32::try_from(cells).unwrap_or(0)
+}
+
 /// 盤面が画面（Canvas）のどこに、どの大きさで描かれているか。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
@@ -12,6 +21,16 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// 盤面を、Canvas の左上から、1マス [`CELL_PIXELS`] 画素で描くときの配置。
+    #[must_use]
+    pub fn canvas() -> Self {
+        Self {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            cell_size: f64::from(CELL_PIXELS),
+        }
+    }
+
     /// 画面上の位置 `(px, py)` にあるマスの `(列, 行)` を返す。盤面の外なら `None`。
     ///
     /// マスの境目は、右と下のマスに含める（左上の角はそのマス、右下の角は隣のマス）。
@@ -120,6 +139,28 @@ mod tests {
         assert_eq!(LAYOUT.cell_at(600.0, 30.0), None);
         assert_eq!(LAYOUT.cell_at(-1.0, 30.0), None);
         assert_eq!(LAYOUT.cell_at(30.0, -1.0), None);
+    }
+
+    /// ⑬: 盤面を描く Canvas の大きさ（`board_pixels`）と、クリックの判定（`Layout::canvas`）が、同じ盤面を指している
+    /// （画面に描いた右下の端の画素は右下のマスで、1画素外は盤面の外。マスの境目も描く大きさと合う）
+    #[test]
+    fn item13_canvas_layout_matches_the_drawn_board_size() {
+        let layout = Layout::canvas();
+        let (width, height) = (
+            f64::from(board_pixels(WIDTH)),
+            f64::from(board_pixels(HEIGHT)),
+        );
+        let cell = f64::from(CELL_PIXELS);
+        assert_eq!(layout.cell_at(0.0, 0.0), Some((0, 0)));
+        assert_eq!(
+            layout.cell_at(width - 1.0, height - 1.0),
+            Some((WIDTH - 1, HEIGHT - 1))
+        );
+        assert_eq!(layout.cell_at(width, height - 1.0), None);
+        assert_eq!(layout.cell_at(width - 1.0, height), None);
+        // 描くマス（CELL_PIXELS 画素ごと）の境目
+        assert_eq!(layout.cell_at(cell - 1.0, cell - 1.0), Some((0, 0)));
+        assert_eq!(layout.cell_at(cell, cell), Some((1, 1)));
     }
 
     /// ⑬: 位置が読めないとき（NaN・無限大）と、1マスの大きさが正でないときも、盤面の外として無視する

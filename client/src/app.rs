@@ -4,7 +4,7 @@
 //! 接続先は、ページを配った場所（`location.host`）から組み立てる。
 
 use crate::input;
-use crate::layout::Layout;
+use crate::layout::{CELL_PIXELS, Layout, board_pixels};
 use crate::state::{Appearance, ClientState};
 use game_core::{ClientMessage, HEIGHT, ServerMessage, Status, WIDTH};
 use std::cell::RefCell;
@@ -17,26 +17,10 @@ use web_sys::{
     MouseEvent, WebSocket,
 };
 
-/// 1マスの一辺（画面上の画素数）。
-const CELL_PIXELS: u32 = 32;
 /// 周りの地雷の数（1〜8）ごとの文字の色。
 const NUMBER_COLORS: [&str; 9] = [
     "", "#0000ff", "#008000", "#ff0000", "#000080", "#800000", "#008080", "#000000", "#808080",
 ];
-
-/// 盤面は Canvas の左上から描く。
-fn layout() -> Layout {
-    Layout {
-        origin_x: 0.0,
-        origin_y: 0.0,
-        cell_size: f64::from(CELL_PIXELS),
-    }
-}
-
-/// マスの数 `cells` 個ぶんの画素数。
-fn board_pixels(cells: usize) -> u32 {
-    CELL_PIXELS * u32::try_from(cells).unwrap_or(0)
-}
 
 /// 盤面の座標（0〜15）を、描画用の数にする。
 fn to_f64(n: usize) -> f64 {
@@ -127,7 +111,9 @@ pub fn start() -> Result<(), JsValue> {
     listen(&canvas, "mousemove", move |event: MouseEvent| {
         let mut app = shared.borrow_mut();
         let (px, py) = (f64::from(event.offset_x()), f64::from(event.offset_y()));
-        if let Some(message) = input::cursor_message(&layout(), &mut app.last_cursor, px, py) {
+        if let Some(message) =
+            input::cursor_message(&Layout::canvas(), &mut app.last_cursor, px, py)
+        {
             app.send(&message);
         }
     })?;
@@ -135,7 +121,7 @@ pub fn start() -> Result<(), JsValue> {
     listen(&canvas, "mousedown", move |event: MouseEvent| {
         let (px, py) = (f64::from(event.offset_x()), f64::from(event.offset_y()));
         if let Some(button) = input::button_from_dom(event.button())
-            && let Some(message) = input::click_message(&layout(), button, px, py)
+            && let Some(message) = input::click_message(&Layout::canvas(), button, px, py)
         {
             shared.borrow().send(&message);
         }
