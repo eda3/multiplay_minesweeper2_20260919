@@ -5,7 +5,9 @@
 
 mod error;
 mod game;
+mod message;
 mod rng;
 
 pub use error::Error;
 pub use game::{CellState, Game, HEIGHT, MINE_COUNT, Status, WIDTH};
+pub use message::{BoardView, CellView, ClientMessage, RevealedCell, ServerMessage};

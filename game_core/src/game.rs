@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::rng::Rng;
+use serde::{Deserialize, Serialize};
 
 /// 盤面の列数。
 pub const WIDTH: usize = 16;
@@ -20,7 +21,8 @@ pub enum CellState {
 }
 
 /// 勝敗の状態。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     /// 進行中。
     Playing,
