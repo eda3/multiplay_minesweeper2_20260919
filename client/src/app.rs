@@ -167,12 +167,8 @@ fn render(app: &App) {
             WebSocket::OPEN => "接続中",
             _ => "切断されました",
         }));
-    let players = if app.state.player_id().is_some() {
-        format!("参加者: {}人", app.state.player_count())
-    } else {
-        String::new()
-    };
-    app.players.set_text_content(Some(&players));
+    app.players
+        .set_text_content(Some(&app.state.players_label()));
     app.result.set_text_content(Some(match app.state.status() {
         Status::Playing => "",
         Status::Won => "勝ち！",

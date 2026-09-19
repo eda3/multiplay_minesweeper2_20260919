@@ -145,6 +145,16 @@ impl ClientState {
         self.players.len()
     }
 
+    /// 画面に出す、参加者の数の文字。`init` が届くまでは、何も出さない（空）。
+    #[must_use]
+    pub fn players_label(&self) -> String {
+        if self.player_id.is_some() {
+            format!("参加者: {}人", self.player_count())
+        } else {
+            String::new()
+        }
+    }
+
     /// ほかのプレイヤーのカーソル `(プレイヤーの番号, (列, 行))`。番号の小さい順。
     pub fn cursors(&self) -> impl Iterator<Item = (u32, (usize, usize))> {
         self.cursors.iter().map(|(&id, &position)| (id, position))
@@ -600,6 +610,29 @@ mod tests {
             "参加が少ない: {joins_with_others}"
         );
         assert!(leaves >= 300, "退出が少ない: {leaves}");
+        Ok(())
+    }
+
+    /// ⑭: 画面に出す参加者の数の文字が、部屋にいる人数と一致する（`init` が届く前は何も出さない）
+    #[test]
+    fn item14_players_label_shows_the_number_of_people_in_the_room() -> TestResult {
+        assert_eq!(ClientState::default().players_label(), "");
+
+        let mut room = FakeRoom::new(2);
+        for _ in 0..3 {
+            room.join()?;
+        }
+        room.leave(1);
+        room.join()?;
+        // 部屋には 2・3・4 の3人。先にいた人にも、あとから入った人にも、同じ文字が出る
+        assert_eq!(room.clients.len(), 3);
+        for (id, client) in &room.clients {
+            assert_eq!(client.players_label(), "参加者: 3人", "番号 {id} の画面");
+        }
+        room.leave(2);
+        for client in room.clients.values() {
+            assert_eq!(client.players_label(), "参加者: 2人");
+        }
         Ok(())
     }
 }
