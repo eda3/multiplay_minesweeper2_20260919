@@ -6,7 +6,8 @@
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
 use game_core::{
-    BoardView, CellState, ClientMessage, Game, HEIGHT, RevealedCell, ServerMessage, WIDTH,
+    BoardView, CellState, CellView, ClientMessage, Game, HEIGHT, RevealedCell, ServerMessage,
+    Status, WIDTH,
 };
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -30,6 +31,7 @@ async fn start_server(seed: u64) -> anyhow::Result<SocketAddr> {
 }
 
 struct Bot {
+    addr: SocketAddr,
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     player_id: u32,
     initial_board: BoardView,
@@ -40,6 +42,7 @@ impl Bot {
     async fn join(addr: SocketAddr) -> anyhow::Result<Self> {
         let (ws, _) = connect_async(format!("ws://{addr}/ws")).await?;
         let mut bot = Self {
+            addr,
             ws,
             player_id: 0,
             initial_board: BoardView::from_game(&Game::new(0))?,
@@ -260,5 +263,149 @@ async fn invalid_operations_are_ignored_without_stopping_the_server() -> anyhow:
     // ほかの人も、同じサーバーに入れる
     let b = Bot::join(addr).await?;
     assert_ne!(a.player_id, b.player_id);
+    Ok(())
+}
+
+/// `board` が、手元の盤面 `game` の見えている状態（開いたマスと数字・旗・勝敗）と一致することを確かめる。
+/// 期待値は `BoardView::from_game` を使わず、`Game` の問い合わせから1マスずつ求める。
+fn assert_board_shows(board: &BoardView, game: &Game) -> anyhow::Result<()> {
+    assert_eq!(board.cells.len(), WIDTH * HEIGHT);
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let expected = match game.state(x, y)? {
+                CellState::Hidden => CellView::Hidden,
+                CellState::Flagged => CellView::Flagged,
+                CellState::Open => CellView::Open {
+                    adjacent: game.adjacent_mines(x, y)?,
+                },
+            };
+            assert_eq!(board.cells[y * WIDTH + x], expected, "({x}, {y})");
+        }
+    }
+    assert_eq!(board.status, game.status());
+    Ok(())
+}
+
+/// A が `(x, y)` を開く。手元の盤面にも同じ操作をし、A に `cells_revealed` が届くところまで進める。
+/// 勝敗がついたときは、続く `game_over` も読み、その勝敗を返す。
+async fn reveal_as(bot: &mut Bot, game: &mut Game, x: usize, y: usize) -> anyhow::Result<Status> {
+    let status = game.open(x, y)?;
+    bot.send(ClientMessage::RevealCell { x, y }).await?;
+    if status != Status::Lost {
+        bot.expect_revealed().await?;
+    }
+    if status != Status::Playing {
+        match bot.recv().await? {
+            ServerMessage::GameOver { status: told, .. } => assert_eq!(told, status),
+            other => bail!("game_over が届くはずが、{other:?} が届いた"),
+        }
+    }
+    Ok(status)
+}
+
+/// ⑧: あとから入った3人目にも、開いたマスと旗が届く
+#[tokio::test]
+async fn item8_late_joiner_receives_open_cells_and_flags() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+
+    local.toggle_flag(3, 4)?;
+    a.send(ClientMessage::ToggleFlag { x: 3, y: 4 }).await?;
+    a.expect_flag(3, 4, true).await?;
+    b.expect_flag(3, 4, true).await?;
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    b.expect_revealed().await?;
+    local.toggle_flag(12, 12)?;
+    b.send(ClientMessage::ToggleFlag { x: 12, y: 12 }).await?;
+    a.expect_flag(12, 12, true).await?;
+    b.expect_flag(12, 12, true).await?;
+
+    let c = Bot::join(a.addr).await?;
+    assert_board_shows(&c.initial_board, &local)?;
+    // 盤面が空ではないことも確かめる（期待値の側が空だと、上の比べ合いが素通りするため）
+    let opened = c
+        .initial_board
+        .cells
+        .iter()
+        .filter(|cell| matches!(cell, CellView::Open { .. }))
+        .count();
+    assert!(opened >= 9, "開いたマスが届いていない");
+    assert_eq!(c.initial_board.cells[4 * WIDTH + 3], CellView::Flagged);
+    assert_eq!(c.initial_board.cells[12 * WIDTH + 12], CellView::Flagged);
+    assert_eq!(c.initial_board.status, Status::Playing);
+    // 3人目が入ったことは、先の2人にも届く
+    assert_eq!(
+        a.recv().await?,
+        ServerMessage::PlayerJoined {
+            player_id: c.player_id
+        }
+    );
+    Ok(())
+}
+
+/// ⑧: リセットしたあとに入った人には、新しい（何も開いていない）盤面が届く
+#[tokio::test]
+async fn item8_late_joiner_after_reset_receives_a_fresh_board() -> anyhow::Result<()> {
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    local.toggle_flag(3, 4)?;
+    a.send(ClientMessage::ToggleFlag { x: 3, y: 4 }).await?;
+    a.expect_flag(3, 4, true).await?;
+    b.expect_flag(3, 4, true).await?;
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    b.expect_revealed().await?;
+
+    b.send(ClientMessage::ResetGame).await?;
+    assert_eq!(a.recv().await?, ServerMessage::GameReset);
+    assert_eq!(b.recv().await?, ServerMessage::GameReset);
+
+    let c = Bot::join(a.addr).await?;
+    assert_board_shows(&c.initial_board, &Game::new(SEED + 1))?;
+    assert!(
+        c.initial_board
+            .cells
+            .iter()
+            .all(|cell| *cell == CellView::Hidden)
+    );
+    Ok(())
+}
+
+/// ⑧: 負けたあとに入った人には、負けたことと、開いたマスが届く
+#[tokio::test]
+async fn item8_late_joiner_receives_a_lost_game() -> anyhow::Result<()> {
+    let (mut a, _b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    let (mx, my) = (0..HEIGHT)
+        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+        .find(|&(x, y)| local.is_mine(x, y) == Ok(true))
+        .context("地雷がない")?;
+    assert_eq!(reveal_as(&mut a, &mut local, mx, my).await?, Status::Lost);
+
+    let c = Bot::join(a.addr).await?;
+    assert_eq!(c.initial_board.status, Status::Lost);
+    assert_board_shows(&c.initial_board, &local)?;
+    Ok(())
+}
+
+/// ⑧: 勝ったあとに入った人には、勝ったことと、開いたマスが届く
+#[tokio::test]
+async fn item8_late_joiner_receives_a_won_game() -> anyhow::Result<()> {
+    let (mut a, _b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            if local.is_mine(x, y)? || local.state(x, y)? != CellState::Hidden {
+                continue;
+            }
+            reveal_as(&mut a, &mut local, x, y).await?;
+        }
+    }
+    assert_eq!(local.status(), Status::Won);
+
+    let c = Bot::join(a.addr).await?;
+    assert_eq!(c.initial_board.status, Status::Won);
+    assert_board_shows(&c.initial_board, &local)?;
     Ok(())
 }
