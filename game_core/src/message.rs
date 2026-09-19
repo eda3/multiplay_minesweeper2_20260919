@@ -165,12 +165,14 @@ impl BoardView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    /// 接続した本人に、最初に送る。自分の番号と、その時点の盤面。
+    /// 接続した本人に、最初に送る。自分の番号と、その時点の盤面と、今いる参加者。
     Init {
         /// 接続した本人の番号。
         player_id: u32,
         /// その時点で見えている盤面。
         board: BoardView,
+        /// 本人以外の、今いる参加者の番号。
+        players: Vec<u32>,
     },
     /// 新しい人が入った（本人以外に送る）。
     PlayerJoined {
@@ -320,6 +322,7 @@ mod tests {
             ServerMessage::Init {
                 player_id: 7,
                 board,
+                players: vec![2, 3],
             },
             ServerMessage::PlayerJoined { player_id: 1 },
             ServerMessage::PlayerLeft { player_id: 1 },
@@ -394,9 +397,28 @@ mod tests {
         let message = ServerMessage::Init {
             player_id: 7,
             board,
+            players: vec![2, 3],
         };
         let decoded: ServerMessage = serde_json::from_str(&json(&message)?)?;
         assert_eq!(decoded, message);
+        Ok(())
+    }
+
+    #[test]
+    fn init_message_lists_the_other_players() -> Result<(), Box<dyn std::error::Error>> {
+        let board = BoardView::from_game(&Game::new(1))?;
+        let init = |players| ServerMessage::Init {
+            player_id: 7,
+            board: board.clone(),
+            players,
+        };
+        let value: serde_json::Value = serde_json::from_str(&json(&init(vec![2, 3]))?)?;
+        assert_eq!(value["type"], "init");
+        assert_eq!(value["player_id"], 7);
+        assert_eq!(value["players"], serde_json::json!([2, 3]));
+        // 自分以外に誰もいなければ、空の一覧になる
+        let value: serde_json::Value = serde_json::from_str(&json(&init(vec![]))?)?;
+        assert_eq!(value["players"], serde_json::json!([]));
         Ok(())
     }
 

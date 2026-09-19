@@ -58,7 +58,9 @@ impl ClientState {
     /// 盤面の外のマスを指す知らせは無視する。
     pub fn apply(&mut self, message: &ServerMessage) {
         match message {
-            ServerMessage::Init { player_id, board } => {
+            ServerMessage::Init {
+                player_id, board, ..
+            } => {
                 self.cells.clone_from(&board.cells);
                 self.status = board.status;
                 self.mines = board.mines.iter().flatten().copied().collect();
@@ -179,6 +181,7 @@ mod tests {
             Ok(ServerMessage::Init {
                 player_id,
                 board: BoardView::from_game(&self.game)?,
+                players: Vec::new(),
             })
         }
 

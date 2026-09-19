@@ -27,8 +27,15 @@ impl Room {
         let player_id = self.next_player_id;
         self.next_player_id += 1;
         let board = BoardView::from_game(&self.game)?;
+        // 本人はまだ入れていないので、いま入っている人は、すべて本人以外
+        let mut players: Vec<u32> = self.players.keys().copied().collect();
+        players.sort_unstable();
         // 本人が切れていても、部屋には影響しない
-        let _ = tx.send(ServerMessage::Init { player_id, board });
+        let _ = tx.send(ServerMessage::Init {
+            player_id,
+            board,
+            players,
+        });
         self.broadcast(&ServerMessage::PlayerJoined { player_id });
         self.players.insert(player_id, tx);
         Ok(player_id)

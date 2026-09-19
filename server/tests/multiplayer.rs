@@ -37,6 +37,8 @@ struct Bot {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     player_id: u32,
     initial_board: BoardView,
+    /// `init` で知らされた、自分以外の参加者の番号。
+    initial_players: Vec<u32>,
     /// これまでに受け取ったメッセージの生のJSON。
     log: Vec<String>,
 }
@@ -50,12 +52,18 @@ impl Bot {
             ws,
             player_id: 0,
             initial_board: BoardView::from_game(&Game::new(0))?,
+            initial_players: Vec::new(),
             log: Vec::new(),
         };
         match bot.recv().await? {
-            ServerMessage::Init { player_id, board } => {
+            ServerMessage::Init {
+                player_id,
+                board,
+                players,
+            } => {
                 bot.player_id = player_id;
                 bot.initial_board = board;
+                bot.initial_players = players;
                 Ok(bot)
             }
             other => bail!("最初に init が届くはずが、{other:?} が届いた"),
@@ -450,7 +458,11 @@ fn assert_safe_while_playing(raw: &str) -> anyhow::Result<String> {
     let kind = message["type"].as_str().context("type がない")?;
     match kind {
         "init" => {
-            assert_keys(&message, &["type", "player_id", "board"]);
+            // players（自分以外の参加者の番号）は、地雷の位置と関係がないので、届いてよい
+            assert_keys(&message, &["type", "player_id", "board", "players"]);
+            for player in message["players"].as_array().context("players がない")? {
+                assert!(player.is_u64(), "参加者の番号ではない値: {raw}");
+            }
             let board = &message["board"];
             assert_keys(board, &["cells", "status"]);
             assert_eq!(board["status"], "playing", "{raw}");
@@ -857,5 +869,68 @@ async fn cursor_outside_the_board_is_ignored() -> anyhow::Result<()> {
             y: 3
         }
     );
+    Ok(())
+}
+
+/// `init` で知らされた、自分以外の参加者の番号（重なりがないことも確かめる）。
+fn participants(bot: &Bot) -> BTreeSet<u32> {
+    let set: BTreeSet<u32> = bot.initial_players.iter().copied().collect();
+    assert_eq!(set.len(), bot.initial_players.len(), "番号が重なっている");
+    set
+}
+
+/// ⑧: あとから入った人には、今いる参加者（自分以外）が届く。抜けた人は含まれない
+#[tokio::test]
+async fn item8_late_joiner_receives_the_current_participants() -> anyhow::Result<()> {
+    let addr = start_server(SEED).await?;
+    let mut a = Bot::join(addr).await?;
+    assert!(
+        participants(&a).is_empty(),
+        "最初の人には、ほかの参加者がいない"
+    );
+    let mut b = Bot::join(addr).await?;
+    assert_eq!(participants(&b), BTreeSet::from([a.player_id]));
+    let c = Bot::join(addr).await?;
+    assert_eq!(participants(&c), BTreeSet::from([a.player_id, b.player_id]));
+    // 自分の番号は含まれない
+    for bot in [&a, &b, &c] {
+        assert!(!participants(bot).contains(&bot.player_id));
+    }
+
+    // B が抜けたあとに入った人には、B は含まれない。
+    // A に player_left が届いた時点で、サーバーは B が抜けたことを処理し終えている
+    for joined in [b.player_id, c.player_id] {
+        assert_eq!(
+            a.recv().await?,
+            ServerMessage::PlayerJoined { player_id: joined }
+        );
+    }
+    let left = b.player_id;
+    b.ws.close(None).await?;
+    assert_eq!(
+        a.recv().await?,
+        ServerMessage::PlayerLeft { player_id: left }
+    );
+    let d = Bot::join(addr).await?;
+    assert_eq!(participants(&d), BTreeSet::from([a.player_id, c.player_id]));
+    Ok(())
+}
+
+/// ⑧: 途中から入った人には、見えている盤面と今いる参加者が、同じ `init` で届く
+#[tokio::test]
+async fn item8_late_joiner_receives_the_board_and_the_participants_together() -> anyhow::Result<()>
+{
+    let (mut a, mut b) = two_bots(SEED).await?;
+    let mut local = Game::new(SEED);
+    local.toggle_flag(3, 4)?;
+    a.send(ClientMessage::ToggleFlag { x: 3, y: 4 }).await?;
+    a.expect_flag(3, 4, true).await?;
+    b.expect_flag(3, 4, true).await?;
+    reveal_as(&mut a, &mut local, 8, 8).await?;
+    b.expect_revealed().await?;
+
+    let c = Bot::join(a.addr).await?;
+    assert_board_shows(&c.initial_board, &local)?;
+    assert_eq!(participants(&c), BTreeSet::from([a.player_id, b.player_id]));
     Ok(())
 }
