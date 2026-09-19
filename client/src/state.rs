@@ -59,13 +59,16 @@ impl ClientState {
     pub fn apply(&mut self, message: &ServerMessage) {
         match message {
             ServerMessage::Init {
-                player_id, board, ..
+                player_id,
+                board,
+                players,
             } => {
                 self.cells.clone_from(&board.cells);
                 self.status = board.status;
                 self.mines = board.mines.iter().flatten().copied().collect();
                 self.player_id = Some(*player_id);
-                self.players = BTreeSet::from([*player_id]);
+                // 先にいた人（players）と、自分
+                self.players = players.iter().copied().chain([*player_id]).collect();
                 self.cursors.clear();
             }
             ServerMessage::PlayerJoined { player_id } => {
@@ -136,7 +139,7 @@ impl ClientState {
         self.player_id
     }
 
-    /// 繋がっている人数（自分を含む）。自分が入る前からいた人は、数えられない。
+    /// 繋がっている人数（自分を含む）。自分が入る前からいた人も、`init` で知らされて数える。
     #[must_use]
     pub fn player_count(&self) -> usize {
         self.players.len()
@@ -478,6 +481,125 @@ mod tests {
         client.apply(&ServerMessage::PlayerLeft { player_id: 9 });
         assert_eq!(client.player_count(), 2);
         assert_eq!(client.cursors().collect::<Vec<_>>(), vec![(8, (5, 5))]);
+        Ok(())
+    }
+
+    /// サーバーの部屋と、そこに繋がっているクライアントたち（テスト用）。
+    /// 参加・退出のたびに、サーバー（`server/src/room.rs`）と同じ規則で、`init` と知らせを作って届ける。
+    struct FakeRoom {
+        game: Game,
+        next_id: u32,
+        /// 部屋にいる人（番号 → その人の画面）。
+        clients: BTreeMap<u32, ClientState>,
+    }
+
+    impl FakeRoom {
+        fn new(seed: u64) -> Self {
+            Self {
+                game: Game::new(seed),
+                next_id: 1,
+                clients: BTreeMap::new(),
+            }
+        }
+
+        /// 新しい人が入る。本人には、今いる人（自分以外）つきの `init` を、ほかの人には `player_joined` を届ける。
+        fn join(&mut self) -> Result<u32, Error> {
+            let player_id = self.next_id;
+            self.next_id += 1;
+            let init = ServerMessage::Init {
+                player_id,
+                board: BoardView::from_game(&self.game)?,
+                players: self.clients.keys().copied().collect(),
+            };
+            for client in self.clients.values_mut() {
+                client.apply(&ServerMessage::PlayerJoined { player_id });
+            }
+            let mut client = ClientState::default();
+            client.apply(&init);
+            self.clients.insert(player_id, client);
+            Ok(player_id)
+        }
+
+        /// 人が抜ける。残った人に `player_left` を届ける。
+        fn leave(&mut self, player_id: u32) {
+            self.clients.remove(&player_id);
+            for client in self.clients.values_mut() {
+                client.apply(&ServerMessage::PlayerLeft { player_id });
+            }
+        }
+
+        /// どの人の画面でも、参加者の数が、部屋にいる人数と一致することを確かめる。
+        fn assert_counts_match(&self, at: &str) {
+            for (id, client) in &self.clients {
+                assert_eq!(client.player_id(), Some(*id), "{at}");
+                assert_eq!(
+                    client.player_count(),
+                    self.clients.len(),
+                    "{at}: 番号 {id} の画面の人数"
+                );
+            }
+        }
+    }
+
+    /// ⑭: 参加者の数が、先にいた人の画面でも、あとから入った人の画面でも、サーバーにいる人数と一致する
+    #[test]
+    fn item14_participant_count_matches_for_early_and_late_joiners() -> TestResult {
+        let mut room = FakeRoom::new(1);
+        // 1人目は自分だけ。2人目・3人目が入るたびに、先にいた人の数も、入った人の数も増える
+        for expected in 1..=3 {
+            room.join()?;
+            assert_eq!(room.clients.len(), expected);
+            room.assert_counts_match(&format!("{expected}人目が入った"));
+        }
+        // 3人目（あとから入った人）の画面は、最初から3人になっている
+        let latest = *room.clients.keys().next_back().ok_or("誰もいない")?;
+        assert_eq!(room.clients[&latest].player_count(), 3);
+
+        // 真ん中の人が抜けると、残った全員の画面が2人になる
+        room.leave(2);
+        room.assert_counts_match("2人目が抜けた");
+        assert_eq!(room.clients.len(), 2);
+
+        // 抜けたあとに入った人の画面には、抜けた人は数えられない（3人）
+        let late = room.join()?;
+        room.assert_counts_match("抜けたあとに入った");
+        assert_eq!(room.clients[&late].player_count(), 3);
+
+        // 最後の1人になっても合う
+        for id in [1, 3] {
+            room.leave(id);
+            room.assert_counts_match("さらに抜けた");
+        }
+        assert_eq!(room.clients[&late].player_count(), 1);
+        Ok(())
+    }
+
+    /// ⑭: 参加と退出を乱数で繰り返しても、1手ごとに、どの人の画面でも人数が合う
+    #[test]
+    fn item14_participant_count_matches_after_random_joins_and_leaves() -> TestResult {
+        let (mut joins_with_others, mut leaves) = (0, 0);
+        for seed in 0..30 {
+            let mut room = FakeRoom::new(seed);
+            let mut rng = Rng(seed + 1);
+            for step in 0..80 {
+                let crowd = room.clients.len();
+                if crowd == 0 || (crowd < 8 && rng.below(3) != 0) {
+                    joins_with_others += usize::from(crowd > 0);
+                    room.join()?;
+                } else {
+                    let ids: Vec<u32> = room.clients.keys().copied().collect();
+                    room.leave(ids[usize::try_from(rng.below(u64::try_from(ids.len())?))?]);
+                    leaves += 1;
+                }
+                room.assert_counts_match(&format!("seed={seed} step={step}"));
+            }
+        }
+        // 比べる場面が偏っていないことも確かめる（先にいる人がいる中での参加と、退出が、何度も起きている）
+        assert!(
+            joins_with_others >= 300,
+            "参加が少ない: {joins_with_others}"
+        );
+        assert!(leaves >= 300, "退出が少ない: {leaves}");
         Ok(())
     }
 }
